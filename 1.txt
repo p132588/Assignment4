@@ -1,0 +1,53 @@
+from pyspark.sql import SparkSession
+from pyspark.sql import Row
+from pyspark.sql import functions
+from pyspark.sql.functions import col
+from pyspark.sql.window import Window
+
+def parseInput(line):
+    fields = line.split('|')
+    return Row(user_id=int(fields[0]), age=int(fields[1]), gender=fields[2], occupation=fields[3], zip=fields[4])
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.appName("CassandraIntegration").config("spark.cassandra.connection.host", "127.0.0.1").getOrCreate()
+
+    lines_users = spark.sparkContext.textFile("hdfs:///user/maria_dev/ml-100k/u.user")
+    users = lines_users.map(parseInput)
+    usersDataset = spark.createDataFrame(users)
+
+    usersDataset.write\
+        .format("org.apache.spark.sql.cassandra")\
+        .mode('append')\
+        .options(table="users", keyspace="movielens")\
+        .save()
+
+    readUsers = spark.read\
+    .format("org.apache.spark.sql.cassandra")\
+    .options(table="users", keyspace="movielens")\
+    .load()
+    readUsers.createOrReplaceTempView("users")
+
+    lines_ratings = spark.sparkContext.textFile("hdfs:///user/maria_dev/ml-100k/u.data")
+    ratings = lines_ratings.map(lambda line: line.split('\t')).map(lambda x: Row(user_id=int(x[0]), movie_id=int(x[1]), rating=float(x[2])))
+    ratingsDataset = spark.createDataFrame(ratings)
+
+    lines_item = spark.sparkContext.textFile("hdfs:///user/maria_dev/ml-100k/u.item")
+    items = lines_item.map(lambda line: line.split('|')).map(lambda x: Row(user_id=int(x[0]), movie_name=x[1]))
+    itemssDataset = spark.createDataFrame(items)
+
+    movies_avg_rating = ratingsDataset.groupby("movie_id").agg(functions.round(functions.avg("rating"),2))
+
+    average_ratings = ratingsDataset.groupBy('movie_id').agg(functions.avg('rating').alias('avg_rating')).orderBy('avg_rating', ascending=False).limit(10)
+    average_ratings.show()
+
+    windowSpec = Window.partitionBy
+    user_rating_50 = ratingsDataset.withColumn("sum",functions.count("*").over(Window.partitionBy("user_id"))).where("sum > 50")
+    user_like_movie = user_rating_50.join(itemssDataset,"user_id",how='right').dropDuplicates(["user_id"]).select("user_id","movie_name")
+    user_like_movie.show()
+
+    sqlDF = spark.sql("SELECT * FROM users WHERE age < 20")
+    sqlDF.show()
+
+    scientist_users = spark.sql("SELECT * FROM USERS where occupation = 'scientist' AND age >= 30 AND age <= 409")
+    scientist_users.show()
+    spark.stop()
